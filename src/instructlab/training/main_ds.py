@@ -174,6 +174,7 @@ def train(
     val_data_loader=None,
     validation_frequency=None,
     on_demand_checkpointing: bool = False,
+    callback_manager=None,
 ):
     model.train()
 
@@ -228,13 +229,25 @@ def train(
     global_grad_norm = None
 
     # Initialize the batch loss manager
-    batch_loss_manager = BatchLossManager(model, accelerator, world_size, local_rank)
+    batch_loss_manager = BatchLossManager(
+        model, accelerator, world_size, local_rank, callback_manager=callback_manager
+    )
+
+    if callback_manager:
+        callback_manager.context.step = global_step
+        callback_manager.context.total_samples = samples_seen
+        callback_manager.fire("on_train_begin")
 
     # Blast through batches
     for epoch in range(args.current_epoch, args.num_epochs):
         # set the epoch for correct sampling
         accelerator.train_loader.sampler.set_epoch(epoch)
         num_epoch_steps = len(accelerator.train_loader)
+
+        if callback_manager:
+            callback_manager.context.epoch = epoch
+            callback_manager.fire("on_epoch_begin")
+
         if local_rank == 0:
             inner_pb = tqdm(range(num_epoch_steps), desc=f"Epoch {epoch}")
 
@@ -247,6 +260,10 @@ def train(
                     inner_pb.update(1)
                 continue
             start = time.time()
+
+            if callback_manager:
+                callback_manager.context.step = global_step
+                callback_manager.fire("on_step_begin")
 
             # Process the batch using the BatchLossManager.
             # When on-demand checkpointing is enabled, pass a callback so
@@ -265,24 +282,40 @@ def train(
             # exact resumption.
             if batch_metrics.interrupted:
                 _save_and_exit("during minibatch processing")
+                if callback_manager:
+                    callback_manager.fire("on_train_end")
+                    callback_manager.close()
                 return
 
             if on_demand_checkpointing and check_checkpoint_requested():
                 _save_and_exit("before optimizer step")
+                if callback_manager:
+                    callback_manager.fire("on_train_end")
+                    callback_manager.close()
                 return
 
             base_logger.info(
                 f"Epoch: {epoch}, Step: {global_step}, Rank: {dist.get_rank()}, loss = {avg_loss_across_ranks:.6f}, grad_accum_steps = {batch_metrics.grad_accum_steps}"
             )
 
+            if callback_manager:
+                callback_manager.context.loss = float(avg_loss_across_ranks)
+                callback_manager.fire("on_pre_optimizer_step")
+
             # Take optimizer step after all minibatches
             accelerator.take_optimizer_step()
+
+            if callback_manager:
+                callback_manager.fire("on_optimizer_step")
 
             # Update samples seen after the optimizer step has been applied
             samples_seen += batch_metrics.total_samples
 
             if on_demand_checkpointing and check_checkpoint_requested():
                 _save_and_exit("after optimizer step")
+                if callback_manager:
+                    callback_manager.fire("on_train_end")
+                    callback_manager.close()
                 return
 
             if local_rank == 0:
@@ -328,6 +361,23 @@ def train(
                     extra={"step": global_step},
                 )
 
+                if callback_manager:
+                    callback_manager.context.learning_rate = current_lr
+                    callback_manager.context.grad_norm = global_grad_norm
+                    callback_manager.context.elapsed_time = elapsed_time
+                    callback_manager.context.overall_throughput = overall_throughput
+                    callback_manager.context.cuda_mem_allocated = cuda_mem_allocated
+                    callback_manager.context.total_samples = samples_seen
+                    callback_manager.context.total_tokens = batch_metrics.total_length
+                    callback_manager.context.batch_metrics = {
+                        "total_samples": batch_metrics.total_samples,
+                        "total_length": batch_metrics.total_length,
+                        "num_loss_counted_tokens": batch_metrics.num_loss_counted_tokens,
+                        "grad_accum_steps": batch_metrics.grad_accum_steps,
+                        "num_minibatches": batch_metrics.num_minibatches,
+                    }
+                    callback_manager.fire("on_log")
+
             # Compute validation loss if it's time to validate
             if (
                 val_data_loader is not None
@@ -343,6 +393,9 @@ def train(
                         val_metrics,
                         extra={"step": global_step},
                     )
+                if callback_manager and val_metrics:
+                    callback_manager.context.val_metrics = dict(val_metrics)
+                    callback_manager.fire("on_evaluate")
 
             if args.save_samples > 0 and (samples_seen % args.save_samples == 0):
                 base_logger.debug(f"Saving checkpoint at step {global_step}")
@@ -357,11 +410,18 @@ def train(
                 )
                 base_logger.debug("RANK (%d) waiting at post-save barrier.", local_rank)
                 dist.barrier()
+                if callback_manager:
+                    callback_manager.fire("on_save", checkpoint_path=args.output_dir)
 
             global_step += 1
             if local_rank == 0:
                 inner_pb.update(1)
             torch.cuda.empty_cache()
+
+            if callback_manager:
+                callback_manager.context.step = global_step
+                callback_manager.fire("on_step_end")
+
         if args.checkpoint_at_epoch:
             base_logger.debug(f"Saving checkpoint at epoch {epoch}")
             save_checkpoint(
@@ -377,6 +437,11 @@ def train(
             )
             base_logger.debug("RANK (%d) waiting at post-save barrier.", local_rank)
             dist.barrier()
+            if callback_manager:
+                callback_manager.fire("on_save", checkpoint_path=args.output_dir)
+
+        if callback_manager:
+            callback_manager.fire("on_epoch_end")
 
     if args.save_last:
         save_hf_format_accelerate(
@@ -387,6 +452,12 @@ def train(
             samples_seen,
             is_lora=bool(args.lora_r),
         )
+        if callback_manager:
+            callback_manager.fire("on_save", checkpoint_path=args.output_dir)
+
+    if callback_manager:
+        callback_manager.fire("on_train_end")
+        callback_manager.close()
 
 
 # This function makes an effort to stick to a default value from torch library,
@@ -616,6 +687,28 @@ def main(args):
 
     load_latest_full_state(args=args, accelerator=accelerator)
 
+    # Deserialize callbacks if passed via CLI
+    callback_manager = None
+    if getattr(args, "callbacks", None):
+        # First Party
+        from instructlab.training.callbacks import (
+            CallbackManager,
+            deserialize_callbacks_from_cli,
+        )
+
+        callback_manager = CallbackManager()
+        for cb in deserialize_callbacks_from_cli(args.callbacks):
+            callback_manager.add_callback(cb)
+
+        callback_manager.context.output_dir = args.output_dir
+        callback_manager.context.model_name_or_path = args.model_name_or_path
+        callback_manager.context.max_epochs = args.num_epochs
+        callback_manager.context.world_size = int(os.environ.get("WORLD_SIZE", "1"))
+        callback_manager.context.is_local_process_zero = (
+            int(os.environ["LOCAL_RANK"]) == 0
+        )
+        callback_manager.context.is_world_process_zero = dist.get_rank() == 0
+
     train(
         args,
         model=m,
@@ -623,6 +716,7 @@ def main(args):
         val_data_loader=val_loader,
         validation_frequency=validation_frequency,
         on_demand_checkpointing=getattr(args, "on_demand_checkpointing", False),
+        callback_manager=callback_manager,
     )
 
     dist.barrier()
@@ -862,6 +956,14 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
 
     if train_args.on_demand_checkpointing:
         command.append("--on_demand_checkpointing")
+
+    if train_args.callbacks:
+        # First Party
+        from instructlab.training.callbacks import serialize_callbacks_for_cli
+
+        command.append(
+            f"--callbacks={serialize_callbacks_for_cli(train_args.callbacks)}"
+        )
 
     logger.info("Running training command as subprocess: %s", " ".join(command))
 
@@ -1244,6 +1346,12 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help="How often to evaluate validation loss (in training steps). Required when validation_split > 0.",
+    )
+    parser.add_argument(
+        "--callbacks",
+        type=str,
+        default=None,
+        help="Base64-encoded serialized callbacks (internal use, set via TrainingArgs).",
     )
     args = parser.parse_args()
 

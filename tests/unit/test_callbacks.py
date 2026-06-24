@@ -210,8 +210,10 @@ class TestCallbackManager:
 
     def test_close(self):
         m = CallbackManager()
-        assert m._thread.is_alive()
-        m.close()
+        try:
+            assert m._thread.is_alive()
+        finally:
+            m.close()
         assert not m._thread.is_alive()
 
     def test_empty_manager_no_callbacks(self, mgr):

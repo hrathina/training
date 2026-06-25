@@ -383,6 +383,7 @@ class TestAllRanksAndUserAPI:
         assert sorted(fired) == sorted(HOOK_NAMES)
 
     def test_public_import_from_package(self):
+        # First Party
         from instructlab.training import TrainerCallback, TrainingContext
 
         assert TrainerCallback is not None
@@ -393,6 +394,7 @@ class TestAllRanksAndUserAPI:
         cb.on_log(ctx)
 
     def test_training_args_accepts_callbacks(self):
+        # First Party
         from instructlab.training import TrainingArgs
 
         assert "callbacks" in TrainingArgs.model_fields

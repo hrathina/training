@@ -976,7 +976,11 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
             f"--callbacks={serialize_callbacks_for_cli(train_args.callbacks)}"
         )
 
-    logger.info("Running training command as subprocess: %s", " ".join(command))
+    redacted_command = [
+        c if not c.startswith("--callbacks=") else "--callbacks=<redacted>"
+        for c in command
+    ]
+    logger.info("Running training command as subprocess: %s", " ".join(redacted_command))
 
     # --- On-demand checkpointing: install signal handlers in the parent ---
     signal_handler = None

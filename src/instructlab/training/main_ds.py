@@ -376,7 +376,9 @@ def train(
                         "grad_accum_steps": batch_metrics.grad_accum_steps,
                         "num_minibatches": batch_metrics.num_minibatches,
                     }
-                    callback_manager.fire("on_log")
+
+            if callback_manager:
+                callback_manager.fire("on_log")
 
             # Compute validation loss if it's time to validate
             if (

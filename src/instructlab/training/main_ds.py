@@ -215,6 +215,7 @@ def train(
     # Mini_trainer approach: batch_size will be determined dynamically by data loader
     # For save logic, use effective_batch_size since that's the target
     samples_seen = 0
+    tokens_seen = 0
 
     if hasattr(args, "samples_seen"):
         logger.info("Updating 'samples_seen' %d", args.samples_seen)
@@ -308,8 +309,9 @@ def train(
             if callback_manager:
                 callback_manager.fire("on_optimizer_step")
 
-            # Update samples seen after the optimizer step has been applied
+            # Update samples/tokens seen after the optimizer step has been applied
             samples_seen += batch_metrics.total_samples
+            tokens_seen += batch_metrics.total_length
 
             if on_demand_checkpointing and check_checkpoint_requested():
                 _save_and_exit("after optimizer step")
@@ -367,17 +369,18 @@ def train(
                     callback_manager.context.elapsed_time = elapsed_time
                     callback_manager.context.overall_throughput = overall_throughput
                     callback_manager.context.cuda_mem_allocated = cuda_mem_allocated
-                    callback_manager.context.total_samples = samples_seen
-                    callback_manager.context.total_tokens = batch_metrics.total_length
-                    callback_manager.context.batch_metrics = {
-                        "total_samples": batch_metrics.total_samples,
-                        "total_length": batch_metrics.total_length,
-                        "num_loss_counted_tokens": batch_metrics.num_loss_counted_tokens,
-                        "grad_accum_steps": batch_metrics.grad_accum_steps,
-                        "num_minibatches": batch_metrics.num_minibatches,
-                    }
 
             if callback_manager:
+                callback_manager.context.total_samples = samples_seen
+                callback_manager.context.total_tokens = tokens_seen
+                callback_manager.context.loss = float(avg_loss_across_ranks)
+                callback_manager.context.batch_metrics = {
+                    "total_samples": batch_metrics.total_samples,
+                    "total_length": batch_metrics.total_length,
+                    "num_loss_counted_tokens": batch_metrics.num_loss_counted_tokens,
+                    "grad_accum_steps": batch_metrics.grad_accum_steps,
+                    "num_minibatches": batch_metrics.num_minibatches,
+                }
                 callback_manager.fire("on_log")
 
             # Compute validation loss if it's time to validate
@@ -413,7 +416,9 @@ def train(
                 base_logger.debug("RANK (%d) waiting at post-save barrier.", local_rank)
                 dist.barrier()
                 if callback_manager:
-                    callback_manager.fire("on_save", checkpoint_path=args.output_dir)
+                    subdir = "last_epoch" if args.keep_last_checkpoint_only else f"samples_{samples_seen}"
+                    ckpt_path = os.path.join(args.output_dir, "hf_format", subdir)
+                    callback_manager.fire("on_save", checkpoint_path=ckpt_path)
 
             global_step += 1
             if local_rank == 0:
@@ -440,7 +445,9 @@ def train(
             base_logger.debug("RANK (%d) waiting at post-save barrier.", local_rank)
             dist.barrier()
             if callback_manager:
-                callback_manager.fire("on_save", checkpoint_path=args.output_dir)
+                subdir = "last_epoch" if args.keep_last_checkpoint_only else f"samples_{samples_seen}"
+                ckpt_path = os.path.join(args.output_dir, "hf_format", subdir)
+                callback_manager.fire("on_save", checkpoint_path=ckpt_path)
 
         if callback_manager:
             callback_manager.fire("on_epoch_end")
@@ -455,7 +462,9 @@ def train(
             is_lora=bool(args.lora_r),
         )
         if callback_manager:
-            callback_manager.fire("on_save", checkpoint_path=args.output_dir)
+            subdir = "last_epoch" if args.keep_last_checkpoint_only else f"samples_{samples_seen}"
+            ckpt_path = os.path.join(args.output_dir, "hf_format", subdir)
+            callback_manager.fire("on_save", checkpoint_path=ckpt_path)
 
     if callback_manager:
         callback_manager.fire("on_train_end")

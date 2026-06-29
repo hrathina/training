@@ -2,6 +2,7 @@
 """Tests for the callback system."""
 
 # Standard
+import asyncio
 import time
 
 # Third Party
@@ -13,6 +14,7 @@ from instructlab.training.callbacks import (
     CallbackManager,
     TrainerCallback,
     TrainingContext,
+    deserialize_callback,
     deserialize_callbacks_from_cli,
     serialize_callbacks_for_cli,
 )
@@ -215,6 +217,42 @@ class TestCallbackManager:
         finally:
             m.close()
         assert not m._thread.is_alive()
+
+    def test_close_idempotent(self):
+        m = CallbackManager()
+        m.close()
+        m.close()
+
+    def test_async_callback(self, mgr):
+        results = []
+
+        class AsyncCb(TrainerCallback):
+            async def on_log(self, context):
+                await asyncio.sleep(0.01)
+                results.append("async_done")
+
+        mgr.add_callback(AsyncCb())
+        mgr.fire("on_log")
+        time.sleep(0.2)
+        assert results == ["async_done"]
+
+    def test_remove_callback_others_still_fire(self, mgr):
+        results = []
+
+        class A(TrainerCallback):
+            def on_log(self, context):
+                results.append("A")
+
+        class B(TrainerCallback):
+            def on_log(self, context):
+                results.append("B")
+
+        mgr.add_callback(A())
+        mgr.add_callback(B())
+        mgr.remove_callback(A)
+        mgr.fire("on_log")
+        time.sleep(0.1)
+        assert results == ["B"]
 
     def test_empty_manager_no_callbacks(self, mgr):
         assert mgr.has_callbacks("on_log") is False
@@ -451,7 +489,7 @@ class TestSerialization:
         assert type(restored[0]).__name__ == "First"
         assert type(restored[1]).__name__ == "Second"
 
-    def test_non_zero_arg_constructor_raises(self):
+    def test_non_zero_arg_constructor_raises_on_deserialize(self):
         class BadCallback(TrainerCallback):
             def __init__(self, url):
                 self.url = url
@@ -459,5 +497,22 @@ class TestSerialization:
             def on_log(self, context):
                 pass
 
-        with pytest.raises(TypeError, match="zero-argument constructor"):
-            serialize_callbacks_for_cli([BadCallback("http://example.com")])
+        encoded = serialize_callbacks_for_cli([BadCallback("http://example.com")])
+        with pytest.raises(TypeError):
+            deserialize_callbacks_from_cli(encoded)
+
+    def test_malformed_base64_raises(self):
+        with pytest.raises(Exception):
+            deserialize_callback("not-valid-base64!!!")
+
+    def test_inline_imports_survive_round_trip(self):
+        class InlineImportCb(TrainerCallback):
+            def on_log(self, context):
+                import json
+                return json.dumps({"step": context.step})
+
+        encoded = serialize_callbacks_for_cli([InlineImportCb()])
+        restored = deserialize_callbacks_from_cli(encoded)
+        ctx = TrainingContext(step=42)
+        result = restored[0].on_log(ctx)
+        assert result == '{"step": 42}'

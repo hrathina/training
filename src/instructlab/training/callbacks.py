@@ -8,6 +8,7 @@ without blocking the training loop or propagating exceptions.
 """
 
 # Standard
+import dataclasses
 from dataclasses import dataclass, field
 from typing import Any
 import asyncio
@@ -72,12 +73,23 @@ class TrainingContext:
     is_world_process_zero: bool = True
 
 
+_CONTEXT_FIELD_NAMES = frozenset(f.name for f in dataclasses.fields(TrainingContext))
+
+
 class TrainerCallback:
     """Base class for training callbacks. Subclass and override hooks you need.
 
-    Callbacks fire on ALL distributed ranks. Use context.is_world_process_zero
-    or context.is_local_process_zero to gate rank-specific side effects
-    (logging, saving, external API calls).
+    All methods are no-ops by default. Callbacks receive a TrainingContext
+    snapshot and are purely observational (they cannot affect training flow).
+    Callbacks fire on all ranks; use context.is_world_process_zero or
+    context.is_local_process_zero to gate rank-specific behavior.
+
+    Note: on_before_forward and on_after_backward fire once per microbatch
+    inside the gradient accumulation loop, not once per training step.
+
+    Callbacks must be self-contained for serialization across the torchrun
+    subprocess boundary: all imports must be inside method bodies, and
+    constructors must work with no arguments (or all-default arguments).
     """
 
     def on_train_begin(self, context: TrainingContext) -> None:
@@ -155,6 +167,10 @@ class CallbackManager:
             ]
 
     def fire(self, hook_name: str, **kwargs) -> None:
+        if hook_name not in HOOK_NAMES:
+            raise ValueError(
+                f"Unknown hook: '{hook_name}'. Valid hooks: {HOOK_NAMES}"
+            )
         if not self.has_callbacks(hook_name):
             return
 
@@ -162,11 +178,10 @@ class CallbackManager:
         snapshot.hook_name = hook_name
         snapshot.batch_metrics = dict(snapshot.batch_metrics)
         snapshot.val_metrics = dict(snapshot.val_metrics)
-        _valid_fields = {f.name for f in snapshot.__dataclass_fields__.values()}
         for key, value in kwargs.items():
-            if key not in _valid_fields:
+            if key not in _CONTEXT_FIELD_NAMES:
                 raise ValueError(
-                    f"Unknown TrainingContext field: '{key}'. Valid fields: {sorted(_valid_fields)}"
+                    f"Unknown TrainingContext field: '{key}'. Valid fields: {sorted(_CONTEXT_FIELD_NAMES)}"
                 )
             setattr(snapshot, key, value)
 
@@ -216,27 +231,21 @@ class CallbackManager:
 
     def close(self) -> None:
         """Shut down the background event loop and thread."""
+        if self._loop.is_closed():
+            return
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=5)
-        self._loop.close()
+        if not self._thread.is_alive() and not self._loop.is_closed():
+            self._loop.close()
 
 
 def serialize_callback(callback: TrainerCallback) -> str:
     """Serialize a TrainerCallback subclass to a base64 string.
 
-    Callbacks must be self-contained classes with zero-argument constructors.
-    Any imports needed inside hooks should be inline (inside the method body),
-    not at module level.
+    The class must be self-contained: all imports must be inside method
+    bodies. The constructor must work with no arguments (or all defaults).
     """
-    cls = type(callback)
-    try:
-        cls()
-    except TypeError as e:
-        raise TypeError(
-            f"Callback {cls.__name__} must have a zero-argument constructor "
-            f"to be serializable across the torchrun subprocess boundary: {e}"
-        ) from e
-    source = inspect.getsource(cls)
+    source = inspect.getsource(type(callback))
     source = textwrap.dedent(source)
     return base64.b64encode(source.encode("utf-8")).decode("ascii")
 
@@ -248,7 +257,8 @@ def deserialize_callback(encoded: str) -> TrainerCallback:
         "TrainerCallback": TrainerCallback,
         "TrainingContext": TrainingContext,
     }
-    exec(source, namespace)  # noqa: S102
+    # Only called with source from run_training() serialization, never untrusted input
+    exec(source, namespace)  # noqa: S102  # pylint: disable=exec-used
     classes = [
         v
         for v in namespace.values()
@@ -259,7 +269,7 @@ def deserialize_callback(encoded: str) -> TrainerCallback:
     if len(classes) != 1:
         raise ValueError(
             f"Expected exactly one TrainerCallback subclass, "
-            f"got {len(classes)}. Source:\n{source}"
+            f"got {len(classes)}."
         )
     return classes[0]()
 

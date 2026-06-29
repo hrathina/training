@@ -420,14 +420,13 @@ def train(
                     ckpt_path = os.path.join(args.output_dir, "hf_format", subdir)
                     callback_manager.fire("on_save", checkpoint_path=ckpt_path)
 
+            if callback_manager:
+                callback_manager.fire("on_step_end")
+
             global_step += 1
             if local_rank == 0:
                 inner_pb.update(1)
             torch.cuda.empty_cache()
-
-            if callback_manager:
-                callback_manager.context.step = global_step
-                callback_manager.fire("on_step_end")
 
         if args.checkpoint_at_epoch:
             base_logger.debug(f"Saving checkpoint at epoch {epoch}")

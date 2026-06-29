@@ -223,6 +223,19 @@ class TestCallbackManager:
         m.close()
         m.close()
 
+    def test_fire_after_close_is_noop(self):
+        m = CallbackManager()
+        results = []
+
+        class Recorder(TrainerCallback):
+            def on_log(self, context):
+                results.append("fired")
+
+        m.add_callback(Recorder())
+        m.close()
+        m.fire("on_log")
+        assert results == []
+
     def test_async_callback(self, mgr):
         results = []
 
@@ -269,6 +282,27 @@ class TestCallbackManager:
         mgr.fire("on_step_begin")
         time.sleep(0.1)
         assert captured == ["on_step_begin"]
+
+    def test_per_callback_snapshot_isolation(self, mgr):
+        captured_a = []
+        captured_b = []
+
+        class MutatingCb(TrainerCallback):
+            def on_log(self, context):
+                context.batch_metrics["injected"] = "from_a"
+                captured_a.append(dict(context.batch_metrics))
+
+        class ObserverCb(TrainerCallback):
+            def on_log(self, context):
+                captured_b.append(dict(context.batch_metrics))
+
+        mgr.add_callback(MutatingCb())
+        mgr.add_callback(ObserverCb())
+        mgr.context.batch_metrics = {"loss": 1.0}
+        mgr.fire("on_log")
+        time.sleep(0.2)
+        assert captured_a == [{"loss": 1.0, "injected": "from_a"}]
+        assert captured_b == [{"loss": 1.0}]
 
     def test_dict_fields_snapshot_isolation(self, mgr):
         captured = []

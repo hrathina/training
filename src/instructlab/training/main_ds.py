@@ -720,15 +720,19 @@ def main(args):
         )
         callback_manager.context.is_world_process_zero = dist.get_rank() == 0
 
-    train(
-        args,
-        model=m,
-        accelerator=accelerator,
-        val_data_loader=val_loader,
-        validation_frequency=validation_frequency,
-        on_demand_checkpointing=getattr(args, "on_demand_checkpointing", False),
-        callback_manager=callback_manager,
-    )
+    try:
+        train(
+            args,
+            model=m,
+            accelerator=accelerator,
+            val_data_loader=val_loader,
+            validation_frequency=validation_frequency,
+            on_demand_checkpointing=getattr(args, "on_demand_checkpointing", False),
+            callback_manager=callback_manager,
+        )
+    finally:
+        if callback_manager:
+            callback_manager.close()
 
     dist.barrier()
     dist.destroy_process_group()

@@ -171,6 +171,8 @@ class CallbackManager:
             raise ValueError(
                 f"Unknown hook: '{hook_name}'. Valid hooks: {HOOK_NAMES}"
             )
+        if self._loop.is_closed():
+            return
         if not self.has_callbacks(hook_name):
             return
 
@@ -191,8 +193,11 @@ class CallbackManager:
                 TrainerCallback, hook_name
             ):
                 continue
+            cb_snapshot = copy.copy(snapshot)
+            cb_snapshot.batch_metrics = dict(snapshot.batch_metrics)
+            cb_snapshot.val_metrics = dict(snapshot.val_metrics)
             future = asyncio.run_coroutine_threadsafe(
-                self._safe_invoke(method, snapshot), self._loop
+                self._safe_invoke(method, cb_snapshot), self._loop
             )
             if hook_name == "on_train_end":
                 try:
@@ -204,7 +209,12 @@ class CallbackManager:
                         hook_name,
                     )
                 except Exception:
-                    pass
+                    logger.warning(
+                        "Callback %s.%s failed during on_train_end.",
+                        type(callback).__name__,
+                        hook_name,
+                        exc_info=True,
+                    )
 
     async def _safe_invoke(self, method, context: TrainingContext) -> None:
         try:
@@ -233,6 +243,20 @@ class CallbackManager:
         """Shut down the background event loop and thread."""
         if self._loop.is_closed():
             return
+        try:
+            pending = asyncio.all_tasks(self._loop)
+        except RuntimeError:
+            pending = set()
+        if pending:
+
+            async def _drain():
+                await asyncio.gather(*pending, return_exceptions=True)
+
+            future = asyncio.run_coroutine_threadsafe(_drain(), self._loop)
+            try:
+                future.result(timeout=5)
+            except Exception:
+                pass
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=5)
         if not self._thread.is_alive() and not self._loop.is_closed():

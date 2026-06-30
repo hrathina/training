@@ -416,7 +416,11 @@ def train(
                 base_logger.debug("RANK (%d) waiting at post-save barrier.", local_rank)
                 dist.barrier()
                 if callback_manager:
-                    subdir = "last_epoch" if args.keep_last_checkpoint_only else f"samples_{samples_seen}"
+                    subdir = (
+                        "last_epoch"
+                        if args.keep_last_checkpoint_only
+                        else f"samples_{samples_seen}"
+                    )
                     ckpt_path = os.path.join(args.output_dir, "hf_format", subdir)
                     callback_manager.fire("on_save", checkpoint_path=ckpt_path)
 
@@ -444,7 +448,11 @@ def train(
             base_logger.debug("RANK (%d) waiting at post-save barrier.", local_rank)
             dist.barrier()
             if callback_manager:
-                subdir = "last_epoch" if args.keep_last_checkpoint_only else f"samples_{samples_seen}"
+                subdir = (
+                    "last_epoch"
+                    if args.keep_last_checkpoint_only
+                    else f"samples_{samples_seen}"
+                )
                 ckpt_path = os.path.join(args.output_dir, "hf_format", subdir)
                 callback_manager.fire("on_save", checkpoint_path=ckpt_path)
 
@@ -461,7 +469,11 @@ def train(
             is_lora=bool(args.lora_r),
         )
         if callback_manager:
-            subdir = "last_epoch" if args.keep_last_checkpoint_only else f"samples_{samples_seen}"
+            subdir = (
+                "last_epoch"
+                if args.keep_last_checkpoint_only
+                else f"samples_{samples_seen}"
+            )
             ckpt_path = os.path.join(args.output_dir, "hf_format", subdir)
             callback_manager.fire("on_save", checkpoint_path=ckpt_path)
 
@@ -983,7 +995,9 @@ def run_training(torch_args: TorchrunArgs, train_args: TrainingArgs) -> None:
         c if not c.startswith("--callbacks=") else "--callbacks=<redacted>"
         for c in command
     ]
-    logger.info("Running training command as subprocess: %s", " ".join(redacted_command))
+    logger.info(
+        "Running training command as subprocess: %s", " ".join(redacted_command)
+    )
 
     # --- On-demand checkpointing: install signal handlers in the parent ---
     signal_handler = None

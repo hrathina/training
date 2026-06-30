@@ -8,12 +8,12 @@ without blocking the training loop or propagating exceptions.
 """
 
 # Standard
-import dataclasses
 from dataclasses import dataclass, field
 from typing import Any
 import asyncio
 import base64
 import copy
+import dataclasses
 import inspect
 import json
 import logging
@@ -168,9 +168,7 @@ class CallbackManager:
 
     def fire(self, hook_name: str, **kwargs) -> None:
         if hook_name not in HOOK_NAMES:
-            raise ValueError(
-                f"Unknown hook: '{hook_name}'. Valid hooks: {HOOK_NAMES}"
-            )
+            raise ValueError(f"Unknown hook: '{hook_name}'. Valid hooks: {HOOK_NAMES}")
         if self._loop.is_closed():
             return
         if not self.has_callbacks(hook_name):
@@ -292,8 +290,7 @@ def deserialize_callback(encoded: str) -> TrainerCallback:
     ]
     if len(classes) != 1:
         raise ValueError(
-            f"Expected exactly one TrainerCallback subclass, "
-            f"got {len(classes)}."
+            f"Expected exactly one TrainerCallback subclass, got {len(classes)}."
         )
     return classes[0]()
 

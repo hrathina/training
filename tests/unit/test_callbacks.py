@@ -542,7 +542,9 @@ class TestSerialization:
     def test_inline_imports_survive_round_trip(self):
         class InlineImportCb(TrainerCallback):
             def on_log(self, context):
+                # Standard
                 import json
+
                 return json.dumps({"step": context.step})
 
         encoded = serialize_callbacks_for_cli([InlineImportCb()])
